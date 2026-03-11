@@ -1,0 +1,5 @@
+{
+  "name": "StockVision AI",
+  "description": "A big data stock market analysis and prediction system using technical indicators and Gemini AI.",
+  "requestFramePermissions": []
+}
