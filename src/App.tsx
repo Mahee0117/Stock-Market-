@@ -28,7 +28,7 @@ import {
   ReferenceLine
 } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
-import { calculateIndicators, getStockPrediction, type StockPrediction } from './services/stockService';
+import { calculateIndicators, type StockPrediction } from './services/stockService';
 import { cn, formatCurrency, formatNumber } from './lib/utils';
 
 const DEFAULT_SYMBOL = 'AAPL';
@@ -101,24 +101,33 @@ export default function App() {
   const handlePredict = async () => {
     if (data.length === 0) return;
     setPredicting(true);
+    setError(null);
     try {
-      const result = await getStockPrediction(symbol, data);
-      setPrediction(result);
-      
-      // Save to DB
-      await fetch(`/api/predictions/${symbol}`, {
+      const response = await fetch('/api/predict', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          predicted_price: result.predictedPrice,
-          direction: result.direction,
-          confidence: result.confidence,
-          insights: result.insights
+          symbol,
+          historicalData: data
         })
+      });
+
+      const result = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(result.error || 'AI Prediction failed');
+      }
+
+      setPrediction({
+        predictedPrice: result.predictedPrice,
+        direction: result.direction,
+        confidence: result.confidence,
+        insights: result.insights,
+        technicalAnalysis: result.technicalAnalysis || 'Analysis complete.'
       });
     } catch (err) {
       console.error('Prediction failed:', err);
-      setError('AI Prediction failed. Please try again later.');
+      setError(err instanceof Error ? err.message : 'AI Prediction failed. Please try again later.');
     } finally {
       setPredicting(false);
     }

@@ -1,51 +1,9 @@
-import { GoogleGenAI, Type } from "@google/genai";
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
 export interface StockPrediction {
   predictedPrice: number;
   direction: 'UP' | 'DOWN';
   confidence: number;
   insights: string;
   technicalAnalysis: string;
-}
-
-export async function getStockPrediction(symbol: string, historicalData: any[]): Promise<StockPrediction> {
-  // Prepare a summary of the data for the model
-  const summary = historicalData.slice(-30).map(d => ({
-    date: d.date,
-    close: d.close,
-    volume: d.volume
-  }));
-
-  const response = await ai.models.generateContent({
-    model: "gemini-3.1-pro-preview",
-    contents: `Analyze the following historical stock data for ${symbol} and provide a prediction for the next trading day. 
-    Data (last 30 days): ${JSON.stringify(summary)}
-    
-    Provide your analysis in JSON format with the following fields:
-    - predictedPrice: number (estimated next day close)
-    - direction: "UP" or "DOWN"
-    - confidence: number (0 to 1)
-    - insights: string (brief summary of the trend)
-    - technicalAnalysis: string (detailed reasoning based on indicators like SMA, RSI, etc.)`,
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          predictedPrice: { type: Type.NUMBER },
-          direction: { type: Type.STRING },
-          confidence: { type: Type.NUMBER },
-          insights: { type: Type.STRING },
-          technicalAnalysis: { type: Type.STRING },
-        },
-        required: ["predictedPrice", "direction", "confidence", "insights", "technicalAnalysis"],
-      },
-    },
-  });
-
-  return JSON.parse(response.text);
 }
 
 export function calculateIndicators(data: any[]) {

@@ -4,6 +4,10 @@ import YahooFinance from 'yahoo-finance2';
 import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { GoogleGenAI, Type } from "@google/genai";
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const yahooFinance = new YahooFinance();
 const __filename = fileURLToPath(import.meta.url);
@@ -70,23 +74,67 @@ async function startServer() {
 
     try {
       console.log(`Fetching data for ${symbol}...`);
-      // Try to fetch from Yahoo Finance
+      
       const endDate = new Date();
+      // Use yesterday as the end for historical to avoid "null" issues with today's open candle
+      const historicalEndDate = new Date();
+      historicalEndDate.setDate(historicalEndDate.getDate() - 1);
+      
       const startDate = new Date();
       if (period === '1mo') startDate.setMonth(endDate.getMonth() - 1);
       else if (period === '6mo') startDate.setMonth(endDate.getMonth() - 6);
       else if (period === '1y') startDate.setFullYear(endDate.getFullYear() - 1);
       else if (period === '5y') startDate.setFullYear(endDate.getFullYear() - 5);
 
-      const result = await yahooFinance.historical(symbol, {
-        period1: startDate,
-        period2: endDate,
-        interval: '1d'
-      }) as any[];
+      // Fetch both historical and current quote for the most "real" experience
+      const [historicalResult, quoteResult] = await Promise.allSettled([
+        yahooFinance.historical(symbol, {
+          period1: startDate,
+          period2: historicalEndDate,
+          interval: '1d'
+        }, { validateResult: false }),
+        yahooFinance.quote(symbol)
+      ]);
 
-      if (!result || result.length === 0) {
-        throw new Error("No data returned from Yahoo Finance");
+      let result: any[] = [];
+      
+      if (historicalResult.status === 'fulfilled' && Array.isArray(historicalResult.value)) {
+        result = historicalResult.value.filter(row => 
+          row && row.close !== null && row.close !== undefined && row.date !== null
+        );
       }
+
+      // Add the live quote as the final data point if available
+      if (quoteResult.status === 'fulfilled' && quoteResult.value) {
+        const q: any = quoteResult.value;
+        const todayStr = new Date().toISOString().split('T')[0];
+        
+        // Only add if we don't already have today's data (unlikely with historicalEndDate being yesterday)
+        if (!result.some(row => {
+          const d = row.date instanceof Date ? row.date.toISOString().split('T')[0] : row.date;
+          return d === todayStr;
+        })) {
+          result.push({
+            date: new Date(),
+            open: q.regularMarketOpen || q.regularMarketPreviousClose || q.regularMarketPrice,
+            high: q.regularMarketDayHigh || q.regularMarketPrice,
+            low: q.regularMarketDayLow || q.regularMarketPrice,
+            close: q.regularMarketPrice,
+            volume: q.regularMarketVolume || 0
+          });
+        }
+      }
+
+      if (result.length === 0) {
+        throw new Error("No valid data returned from Yahoo Finance");
+      }
+
+      // Sort by date to ensure correct order after adding quote
+      result.sort((a, b) => {
+        const da = a.date instanceof Date ? a.date.getTime() : new Date(a.date).getTime();
+        const db = b.date instanceof Date ? b.date.getTime() : new Date(b.date).getTime();
+        return da - db;
+      });
 
       // Store in DB (upsert)
       const insert = db.prepare(`
@@ -98,7 +146,7 @@ async function startServer() {
         for (const row of data) {
           try {
             const dateStr = row.date instanceof Date ? row.date.toISOString().split('T')[0] : row.date;
-            insert.run(symbol, dateStr, row.open, row.high, row.low, row.close, row.volume);
+            insert.run(symbol, dateStr, row.open, row.high, row.low, row.close, row.volume || 0);
           } catch (e) {
             // Ignore
           }
@@ -143,6 +191,77 @@ async function startServer() {
     const { symbol } = req.params;
     const prediction = db.prepare('SELECT * FROM predictions WHERE symbol = ? ORDER BY created_at DESC LIMIT 1').get(symbol);
     res.json(prediction || null);
+  });
+
+  app.post("/api/predict", async (req, res) => {
+    const { symbol, historicalData } = req.body;
+    
+    if (!symbol || !historicalData || !Array.isArray(historicalData)) {
+      return res.status(400).json({ error: "Invalid request body" });
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "Gemini API Key is missing on the server. Please add GEMINI_API_KEY to your .env file." });
+    }
+
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      
+      // Prepare a summary of the data for the model
+      const summary = historicalData.slice(-30).map(d => ({
+        date: d.date,
+        close: d.close,
+        volume: d.volume
+      }));
+
+      const response = await ai.models.generateContent({
+        model: "gemini-1.5-flash", 
+        contents: `Analyze the following historical stock data for ${symbol} and provide a prediction for the next trading day. 
+        Data (last 30 days): ${JSON.stringify(summary)}
+        
+        Provide your analysis in JSON format with the following fields:
+        - predictedPrice: number (estimated next day close)
+        - direction: "UP" or "DOWN"
+        - confidence: number (0 to 1)
+        - insights: string (brief summary of the trend)
+        - technicalAnalysis: string (detailed reasoning based on indicators like SMA, RSI, etc.)`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              predictedPrice: { type: Type.NUMBER },
+              direction: { type: Type.STRING },
+              confidence: { type: Type.NUMBER },
+              insights: { type: Type.STRING },
+              technicalAnalysis: { type: Type.STRING },
+            },
+            required: ["predictedPrice", "direction", "confidence", "insights", "technicalAnalysis"],
+          },
+        },
+      });
+
+      if (!response.text) {
+        throw new Error("Empty response from AI model");
+      }
+
+      const prediction = JSON.parse(response.text);
+      
+      // Save to DB
+      const predictionDate = new Date().toISOString().split('T')[0];
+      const insert = db.prepare(`
+        INSERT INTO predictions (symbol, prediction_date, predicted_price, direction, confidence, insights)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      
+      insert.run(symbol, predictionDate, prediction.predictedPrice, prediction.direction, prediction.confidence, prediction.insights);
+
+      res.json(prediction);
+    } catch (error: any) {
+      console.error("Prediction failed:", error);
+      res.status(500).json({ error: error.message || "AI Prediction failed" });
+    }
   });
 
   app.post("/api/predictions/:symbol", async (req, res) => {
