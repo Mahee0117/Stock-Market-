@@ -6,6 +6,7 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function formatCurrency(value: number) {
+  if (value === undefined || value === null || isNaN(value)) return 'N/A';
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
@@ -13,6 +14,7 @@ export function formatCurrency(value: number) {
 }
 
 export function formatNumber(value: number) {
+  if (value === undefined || value === null || isNaN(value)) return 'N/A';
   return new Intl.NumberFormat('en-US', {
     notation: 'compact',
     maximumFractionDigits: 1,

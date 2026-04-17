@@ -7,7 +7,7 @@ export interface StockPrediction {
 }
 
 export function calculateIndicators(data: any[]) {
-  if (data.length < 50) return data;
+  if (data.length < 2) return data;
 
   return data.map((d, i) => {
     // SMA 20

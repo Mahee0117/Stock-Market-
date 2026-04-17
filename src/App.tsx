@@ -76,7 +76,7 @@ export default function App() {
               direction: existingPred.direction as 'UP' | 'DOWN',
               confidence: existingPred.confidence,
               insights: existingPred.insights,
-              technicalAnalysis: 'Analysis loaded from database.'
+              technicalAnalysis: existingPred.technical_analysis || 'Analysis loaded from history.'
             });
           } else {
             setPrediction(null);
@@ -171,7 +171,8 @@ export default function App() {
                 className="bg-white/5 border border-white/10 rounded-full py-1.5 pl-10 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/50 w-64 transition-all"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    setSymbol((e.target as HTMLInputElement).value.toUpperCase());
+                    const val = (e.target as HTMLInputElement).value.toUpperCase().trim();
+                    if (val) setSymbol(val);
                   }
                 }}
               />

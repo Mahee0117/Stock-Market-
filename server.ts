@@ -6,8 +6,24 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from 'dotenv';
+import fs from 'fs';
 
 dotenv.config();
+
+// Force load from .env if process.env is empty or placeholder (handles AI Studio environment overrides)
+if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'undefined' || process.env.GEMINI_API_KEY === 'MY_GEMINI_API_KEY') {
+  try {
+    const envContent = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf8');
+    const match = envContent.match(/GEMINI_API_KEY=["']?(.*?)["']?(\n|$)/);
+    if (match && match[1]) {
+      process.env.GEMINI_API_KEY = match[1].trim();
+    }
+  } catch (e) {
+    // .env might not exist or be readable
+  }
+}
+
+console.log('API Key present:', !!process.env.GEMINI_API_KEY);
 
 const yahooFinance = new YahooFinance();
 const __filename = fileURLToPath(import.meta.url);
@@ -37,9 +53,17 @@ db.exec(`
     direction TEXT,
     confidence REAL,
     insights TEXT,
+    technical_analysis TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
+
+// Migrations: Add technical_analysis column if it doesn't exist
+try {
+  db.prepare("ALTER TABLE predictions ADD COLUMN technical_analysis TEXT").run();
+} catch (e) {
+  // Column likely already exists
+}
 
 async function startServer() {
   const app = express();
@@ -57,12 +81,14 @@ async function startServer() {
 
   // API Routes
   app.get("/api/health", (req, res) => {
+    const apiKey = process.env.GEMINI_API_KEY;
     res.json({ 
       status: "ok", 
       timestamp: new Date().toISOString(),
       db: db ? "connected" : "failed",
       env: {
-        hasApiKey: !!process.env.GEMINI_API_KEY,
+        hasApiKey: !!apiKey && apiKey.length > 10 && apiKey !== 'MY_GEMINI_API_KEY',
+        apiKeyPrefix: apiKey ? apiKey.substring(0, 4) : null,
         nodeEnv: process.env.NODE_ENV
       }
     });
@@ -201,8 +227,12 @@ async function startServer() {
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "Gemini API Key is missing on the server. Please add GEMINI_API_KEY to your .env file." });
+    const isInvalid = !apiKey || apiKey === 'MY_GEMINI_API_KEY' || apiKey === 'undefined' || apiKey.length < 10;
+    
+    if (isInvalid) {
+      return res.status(500).json({ 
+        error: "Gemini API Key is missing. To fix this in AI Studio: 1. Click the 'Secrets' icon (key) in the sidebar. 2. Add a new secret named 'GEMINI_API_KEY'. 3. Paste your key from aistudio.google.com/app/apikey. 4. Refresh the app." 
+      });
     }
 
     try {
@@ -216,7 +246,7 @@ async function startServer() {
       }));
 
       const response = await ai.models.generateContent({
-        model: "gemini-1.5-flash", 
+        model: "gemini-3-flash-preview", 
         contents: `Analyze the following historical stock data for ${symbol} and provide a prediction for the next trading day. 
         Data (last 30 days): ${JSON.stringify(summary)}
         
@@ -251,32 +281,32 @@ async function startServer() {
       // Save to DB
       const predictionDate = new Date().toISOString().split('T')[0];
       const insert = db.prepare(`
-        INSERT INTO predictions (symbol, prediction_date, predicted_price, direction, confidence, insights)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO predictions (symbol, prediction_date, predicted_price, direction, confidence, insights, technical_analysis)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
       
-      insert.run(symbol, predictionDate, prediction.predictedPrice, prediction.direction, prediction.confidence, prediction.insights);
+      insert.run(symbol, predictionDate, prediction.predictedPrice, prediction.direction, prediction.confidence, prediction.insights, prediction.technicalAnalysis);
 
       res.json(prediction);
     } catch (error: any) {
       console.error("Prediction failed:", error);
-      res.status(500).json({ error: error.message || "AI Prediction failed" });
-    }
-  });
+      
+      let errorMessage = "AI Prediction failed. Please try again later.";
+      
+      // Check for specific Gemini API errors
+      try {
+        const errorBody = JSON.parse(error.message);
+        if (errorBody.error?.reason === 'API_KEY_INVALID' || errorBody.error?.status === 'INVALID_ARGUMENT') {
+          errorMessage = "The Gemini API Key provided is invalid. Please check your API key configuration.";
+        }
+      } catch (e) {
+        if (error.message?.includes("API_KEY_INVALID") || error.message?.includes("key not valid")) {
+          errorMessage = "The Gemini API Key provided is invalid. Please check your API key configuration.";
+        }
+      }
 
-  app.post("/api/predictions/:symbol", async (req, res) => {
-    const { symbol } = req.params;
-    const { predicted_price, direction, confidence, insights } = req.body;
-    
-    const predictionDate = new Date().toISOString().split('T')[0];
-    
-    const insert = db.prepare(`
-      INSERT INTO predictions (symbol, prediction_date, predicted_price, direction, confidence, insights)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
-    
-    insert.run(symbol, predictionDate, predicted_price, direction, confidence, insights);
-    res.json({ success: true });
+      res.status(500).json({ error: errorMessage });
+    }
   });
 
   // Vite middleware for development
